@@ -821,7 +821,7 @@ d:
 代码
 
 ```java
-Path path = Paths.get("d:\\data\\projects\\a\\..\\b");
+Path path = Paths.get("d:\\data\\projects\\a\\..\\b");//找到a的父文件夹作为b的父文件夹。
 System.out.println(path);
 System.out.println(path.normalize()); // 正常化路径
 ```
@@ -982,6 +982,7 @@ Files.walkFileTree(path, new SimpleFileVisitor<Path>(){
     @Override
     public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) 
         throws IOException {
+        //先进入文件夹再删除里面的文件。
         Files.delete(file);
         return super.visitFile(file, attrs);
     }
@@ -989,11 +990,18 @@ Files.walkFileTree(path, new SimpleFileVisitor<Path>(){
     @Override
     public FileVisitResult postVisitDirectory(Path dir, IOException exc) 
         throws IOException {
+        //走出文件夹后把文件夹删除掉。
         Files.delete(dir);
         return super.postVisitDirectory(dir, exc);
     }
 });
 ```
+
+
+
+
+
+
 
 
 
@@ -1028,8 +1036,6 @@ Files.walk(Paths.get(source)).forEach(path -> {
 long end = System.currentTimeMillis();
 System.out.println(end - start);
 ```
-
-
 
 
 
@@ -1118,7 +1124,7 @@ ssc.bind(new InetSocketAddress(8080));
 List<SocketChannel> channels = new ArrayList<>();
 while (true) {
     // 4. accept 建立与客户端连接， SocketChannel 用来与客户端之间通信
-    SocketChannel sc = ssc.accept(); // 非阻塞，线程还会继续运行，如果没有连接建立，但sc是null
+    SocketChannel sc = ssc.accept(); // 非阻塞，线程还会继续运行，如果没有连接建立，但sc是null   
     if (sc != null) {
         log.debug("connected... {}", sc);
         sc.configureBlocking(false); // 非阻塞模式

@@ -528,7 +528,7 @@ s = hello ladidol
 
 
 
-#### ⚠️ Buffer 的线程安全
+#### ⚠️ Buffer 的线程不安全
 
 > Buffer 是**非线程安全的**
 
@@ -591,8 +591,6 @@ public class TestScatteringReads {
 ### 2.5 Gathering Writes
 
 使用如下方式写入，可以将多个 buffer 的数据填充至 channel
-
-
 
 ```java
 public class TestGatheringReads {
@@ -686,4 +684,596 @@ private static void split(ByteBuffer source) {
 }
 ```
 
-2022年10月29日20:10:29明天继续
+
+
+## 3. 文件编程
+
+### 3.1 FileChannel
+
+#### ⚠️ FileChannel 工作模式
+
+> FileChannel 只能工作在阻塞模式下，所以不能使用selector
+
+
+
+#### 获取
+
+不能直接打开 FileChannel，必须通过 FileInputStream、FileOutputStream 或者 RandomAccessFile 来获取 FileChannel，它们都有 getChannel 方法
+
+* 通过 FileInputStream 获取的 channel 只能读
+* 通过 FileOutputStream 获取的 channel 只能写
+* 通过 RandomAccessFile 是否能读写根据构造 RandomAccessFile 时的读写模式决定
+
+
+
+#### 读取
+
+会从 channel 读取数据填充 ByteBuffer，返回值表示读到了多少字节，-1 表示到达了文件的末尾
+
+```java
+int readBytes = channel.read(buffer);
+```
+
+
+
+#### 写入
+
+写入的正确姿势如下， SocketChannel
+
+```java
+ByteBuffer buffer = ...;
+buffer.put(...); // 存入数据
+buffer.flip();   // 切换读模式
+
+while(buffer.hasRemaining()) {
+    channel.write(buffer);
+}
+```
+
+在 while 中调用 channel.write 是因为 write 方法并不能保证一次将 buffer 中的内容全部写入 channel
+
+
+
+#### 关闭
+
+channel 必须关闭，不过调用了 FileInputStream、FileOutputStream 或者 RandomAccessFile 的 close 方法会间接地调用 channel 的 close 方法
+
+
+
+#### 位置
+
+获取当前位置
+
+```java
+long pos = channel.position();
+```
+
+设置当前位置
+
+```java
+long newPos = ...;
+channel.position(newPos);
+```
+
+设置当前位置时，如果设置为文件的末尾
+
+* 这时读取会返回 -1 
+* 这时写入，会追加内容，但要注意如果 position 超过了文件末尾，再写入时在新内容和原末尾之间会有空洞（00）
+
+
+
+#### 大小
+
+使用 size 方法获取文件的大小
+
+
+
+#### 强制写入
+
+操作系统出于性能的考虑，会将数据缓存，不是立刻写入磁盘。可以调用 force(true)  方法将文件内容和元数据（文件的权限等信息）立刻写入磁盘
+
+### 3.2 两个 Channel 传输数据
+
+```java
+// 小于2g的数据，直接转换就行
+public static void main(String[] args) {
+
+    try (
+        FileChannel from = new FileInputStream("E:\\Java\\ladidol\\ladidol_JavaNote\\Netty\\Netty\\netty-demo\\data.txt").getChannel();
+        FileChannel to = new FileOutputStream("E:\\Java\\ladidol\\ladidol_JavaNote\\Netty\\Netty\\netty-demo\\to.txt").getChannel();
+    ) {
+        // 效率高，底层会利用操作系统的零拷贝进行优化，只能传输小于2g的数据。
+        from.transferTo(0, from.size(), to);
+    } catch (IOException e) {
+        e.printStackTrace();
+    }
+
+}
+```
+
+
+
+超过 2g 大小的文件传输
+
+```java
+// 大于2g的数据
+public static void main(String[] args) {
+    try (
+        FileChannel from = new FileInputStream("E:\\Java\\ladidol\\ladidol_JavaNote\\Netty\\Netty\\netty-demo\\data.txt").getChannel();
+        FileChannel to = new FileOutputStream("E:\\Java\\ladidol\\ladidol_JavaNote\\Netty\\Netty\\netty-demo\\to.txt").getChannel();
+    ) {
+        // 效率高，底层会利用操作系统的零拷贝进行优化
+        long size = from.size();
+        // left 变量代表还剩余多少字节
+        for (long left = size; left > 0; ) {
+            System.out.println("position:" + (size - left) + " left:" + left);
+            left -= from.transferTo((size - left), left, to);
+        }
+    } catch (IOException e) {
+        e.printStackTrace();
+    }
+}
+```
+
+实际传输一个超大文件
+
+```
+position:0 left:7769948160
+position:2147483647 left:5622464513
+position:4294967294 left:3474980866
+position:6442450941 left:1327497219
+```
+
+
+
+### 3.3 Path
+
+jdk7 引入了 Path 和 Paths 类
+
+* Path 用来表示文件路径
+* Paths 是工具类，用来获取 Path 实例
+
+```java
+Path source = Paths.get("1.txt"); // 相对路径 使用 user.dir 环境变量来定位 1.txt
+
+Path source = Paths.get("d:\\1.txt"); // 绝对路径 代表了  d:\1.txt
+
+Path source = Paths.get("d:/1.txt"); // 绝对路径 同样代表了  d:\1.txt
+
+Path projects = Paths.get("d:\\data", "projects"); // 代表了  d:\data\projects
+```
+
+* `.` 代表了当前路径
+* `..` 代表了上一级路径
+
+例如目录结构如下
+
+```
+d:
+	|- data
+		|- projects
+			|- a
+			|- b
+```
+
+代码
+
+```java
+Path path = Paths.get("d:\\data\\projects\\a\\..\\b");//找到a的父文件夹作为b的父文件夹。
+System.out.println(path);
+System.out.println(path.normalize()); // 正常化路径
+```
+
+会输出
+
+```
+d:\data\projects\a\..\b
+d:\data\projects\b
+```
+
+
+
+### 3.4 Files
+
+检查文件是否存在
+
+```java
+Path path = Paths.get("helloword/data.txt");
+System.out.println(Files.exists(path));
+```
+
+
+
+创建一级目录
+
+```java
+Path path = Paths.get("helloword/d1");
+Files.createDirectory(path);
+```
+
+* 如果目录已存在，会抛异常 FileAlreadyExistsException
+* 不能一次创建多级目录，否则会抛异常 NoSuchFileException
+
+
+
+创建多级目录用
+
+```java
+Path path = Paths.get("helloword/d1/d2");
+Files.createDirectories(path);
+```
+
+
+
+拷贝文件
+
+```java
+Path source = Paths.get("helloword/data.txt");
+Path target = Paths.get("helloword/target.txt");
+
+Files.copy(source, target);
+```
+
+* 如果文件已存在，会抛异常 FileAlreadyExistsException
+
+如果希望用 source 覆盖掉 target，需要用 StandardCopyOption 来控制
+
+```java
+Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+```
+
+
+
+移动文件
+
+```java
+Path source = Paths.get("helloword/data.txt");
+Path target = Paths.get("helloword/data.txt");
+
+Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+```
+
+* StandardCopyOption.ATOMIC_MOVE 保证文件移动的原子性
+
+
+
+删除文件
+
+```java
+Path target = Paths.get("helloword/target.txt");
+
+Files.delete(target);
+```
+
+* 如果文件不存在，会抛异常 NoSuchFileException
+
+
+
+删除目录
+
+```java
+Path target = Paths.get("helloword/d1");
+
+Files.delete(target);
+```
+
+* 如果目录还有内容，会抛异常 DirectoryNotEmptyException
+
+
+
+遍历目录文件
+
+```java
+/**
+     * 参数：[]
+     * 返回值：void
+     * 作者： ladidol
+     * 描述：看一下有多少个文件和文件夹
+     */
+private static void m1() throws IOException {
+    // 并发安全原子计数器，这里不用count的原因不是多线程，是因为匿名内部类只能使用final变量，而这样了count就不能自加了。
+    final int count = 0;
+
+    AtomicInteger dirCount = new AtomicInteger();
+    AtomicInteger fileCount = new AtomicInteger();
+
+    Files.walkFileTree(Paths.get("E:\\Java\\ladidol\\ladidol_JavaNote\\Netty\\Netty\\"), new SimpleFileVisitor<Path>() {
+
+        @Override
+        public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+
+            System.out.println("=====> " + dir);
+            dirCount.incrementAndGet();
+            return super.preVisitDirectory(dir, attrs);
+        }
+
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+            System.out.println(file);
+            fileCount.incrementAndGet();
+            return super.visitFile(file, attrs);
+        }
+
+    });
+
+    System.out.println("dirCount = " + dirCount);
+    System.out.println("fileCount = " + fileCount);
+}
+```
+
+
+
+统计 java 文件的数目
+
+```java
+/**
+     * 参数：[]
+     * 返回值：void
+     * 作者： ladidol
+     * 描述：查询文件夹下有多少个指定类型文件。
+     */
+private static void m2() throws IOException {
+    Path path = Paths.get("E:\\Java\\ladidol\\ladidol_JavaNote\\Netty\\Netty\\");
+    AtomicInteger fileCount = new AtomicInteger();
+    Files.walkFileTree(path, new SimpleFileVisitor<Path>(){
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
+            throws IOException {
+            if (file.toFile().getName().endsWith(".java")) {
+                System.out.println(file);
+                fileCount.incrementAndGet();
+            }
+            return super.visitFile(file, attrs);
+        }
+    });
+    System.out.println(fileCount); // 11
+}
+```
+
+
+
+删除多级目录
+
+```java
+/**
+     * 参数：[]
+     * 返回值：void
+     * 作者： ladidol
+     * 描述：递归删除文件夹中的文件（夹）
+     */
+private static void m3() throws IOException {
+    Path path = Paths.get("E:\\delete");
+    Files.walkFileTree(path, new SimpleFileVisitor<Path>(){
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
+            throws IOException {
+            //先进入文件夹再删除里面的文件。
+            Files.delete(file);
+            return super.visitFile(file, attrs);
+        }
+
+        @Override
+        public FileVisitResult postVisitDirectory(Path dir, IOException exc)
+            throws IOException {
+            //走出文件夹后把文件夹删除掉。
+            Files.delete(dir);
+            return super.postVisitDirectory(dir, exc);
+        }
+    });
+}
+```
+
+
+
+
+
+
+
+
+
+#### ⚠️ 删除很危险
+
+> 删除是危险操作，确保要递归删除的文件夹没有重要内容
+
+
+
+拷贝多级目录
+
+```java
+public static void main(String[] args) throws IOException {
+
+    String source = "E:\\delete";
+    String target = "E:\\delete123";
+
+    Files.walk(Paths.get(source)).forEach(path -> {
+
+        try {
+            String targetName = path.toString().replace(source, target);// 得到目标文件的绝对路径
+            //是目录
+            if (Files.isDirectory(path)) {
+                Files.createDirectory(Paths.get(targetName));
+            }
+            // 是普通文件
+            else if (Files.isRegularFile(path)) {
+                Files.copy(path, Paths.get(targetName));
+            }
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    });
+
+
+}
+```
+
+
+
+
+
+## 4. 网络编程
+
+### 4.1 非阻塞 vs 阻塞
+
+#### 阻塞
+
+* 阻塞模式下，相关方法都会导致线程暂停
+  * ServerSocketChannel.accept 会在没有连接建立时让线程暂停
+  * SocketChannel.read 会在没有数据可读时让线程暂停
+  * 阻塞的表现其实就是线程暂停了，暂停期间不会占用 cpu，但线程相当于闲置
+* 单线程下，阻塞方法之间相互影响，几乎不能正常工作，需要多线程支持
+* 但多线程下，有新的问题，体现在以下方面
+  * 32 位 jvm 一个线程 320k，64 位 jvm 一个线程 1024k，如果连接数过多，必然导致 OOM，并且线程太多，反而会因为频繁上下文切换导致性能降低
+  * 可以采用线程池技术来减少线程数和线程上下文切换，但治标不治本，如果有很多连接建立，但长时间 inactive，会阻塞线程池中所有线程，因此不适合长连接，只适合短连接
+
+
+
+服务器端
+
+```java
+/**
+     * 参数：[]
+     * 返回值：void
+     * 作者： ladidol
+     * 描述：单线程的阻塞模式
+     */
+private static void m1() throws IOException {
+    // 使用nio 来理解阻塞模式,这里特地用的单线程来实现。
+    // 0. ByteBuffer
+    ByteBuffer buffer = ByteBuffer.allocate(16);
+
+
+    // 1. 创建服务器。
+    ServerSocketChannel ssc = ServerSocketChannel.open();
+
+
+    // 2. 绑定监听端口
+    ssc.bind(new InetSocketAddress(8088));
+
+
+    // 3. 连接集合
+    List<SocketChannel> channels = new ArrayList<>();
+
+    while (true) {
+        // 4. accept 建立于客户端建立连接，SocketChannel 用来于客户端通信
+        log.debug("建立新链接ing");
+        SocketChannel sc = ssc.accept();
+        channels.add(sc);
+        log.debug("已经建立新链接 {}", sc);
+
+        // 5. 接收全部客户端发送的数据
+        for (SocketChannel channel : channels) {
+
+            log.debug("before read ...{}", sc);
+            channel.read(buffer);
+            buffer.flip();
+            debugRead(buffer);
+            buffer.clear();
+            log.debug("after read ...{}", sc);
+        }
+    }
+}
+```
+
+客户端
+
+```java
+public static void main(String[] args) throws IOException {
+    SocketChannel sc = SocketChannel.open();
+    sc.connect(new InetSocketAddress("localhost", 8088));
+    sc.write(Charset.defaultCharset().encode("hello! ladidol!"));
+    System.out.println("waiting...");
+    Scanner scan = new Scanner(System.in);
+    int n = scan.nextInt();
+}
+```
+
+
+
+#### 非阻塞
+
+* 非阻塞模式下，相关方法都会不会让线程暂停
+  * 在 ServerSocketChannel.accept 在没有连接建立时，会返回 null，继续运行
+  * SocketChannel.read 在没有数据可读时，会返回 0，但线程不必阻塞，可以去执行其它 SocketChannel 的 read 或是去执行 ServerSocketChannel.accept 
+  * 写数据时，线程只是等待数据写入 Channel 即可，无需等 Channel 通过网络把数据发送出去
+* 但非阻塞模式下，即使没有连接建立，和可读数据，线程仍然在不断运行，白白浪费了 cpu
+* 数据复制过程中，线程实际还是阻塞的（AIO 改进的地方）
+
+
+
+服务器端，客户端代码不变
+
+```java
+public static void main(String[] args) throws IOException {
+
+    // 使用 nio 来理解非阻塞模式, 单线程
+    // 0. ByteBuffer
+    ByteBuffer buffer = ByteBuffer.allocate(16);
+    // 1. 创建了服务器，设置为非阻塞模式
+    ServerSocketChannel ssc = ServerSocketChannel.open();
+    ssc.configureBlocking(false); // 非阻塞模式
+    // 2. 绑定监听端口
+    ssc.bind(new InetSocketAddress(8088));
+    // 3. 连接集合
+    List<SocketChannel> channels = new ArrayList<>();
+    while (true) {
+        // 4. accept 建立与客户端连接， SocketChannel 用来与客户端之间通信
+        SocketChannel sc = ssc.accept(); // 非阻塞，线程还会继续运行，如果没有连接建立，但sc是null
+        if (sc != null) {
+            log.debug("connected... {}", sc);
+            sc.configureBlocking(false); // 非阻塞模式
+            channels.add(sc);
+        }
+        for (SocketChannel channel : channels) {
+            // 5. 接收客户端发送的数据
+            int read = channel.read(buffer);// 非阻塞，线程仍然会继续运行，如果没有读到数据，read 返回 0
+            if (read > 0) {
+                buffer.flip();
+                debugRead(buffer);
+                buffer.clear();
+                log.debug("after read...{}", channel);
+            }
+        }
+    }
+
+}
+```
+
+
+
+#### 多路复用
+
+2022年11月1日16:57:35明天再来学
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
