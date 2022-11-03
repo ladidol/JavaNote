@@ -1243,7 +1243,458 @@ public static void main(String[] args) throws IOException {
 
 #### 多路复用
 
-2022年11月1日16:57:35明天再来学
+单线程可以配合 Selector 完成对多个 Channel 可读写事件的监控，这称之为多路复用
+
+* 多路复用仅针对网络 IO、普通文件 IO 没法利用多路复用
+* 如果不用 Selector 的非阻塞模式，线程大部分时间都在做无用功，而 Selector 能够保证
+  * 有可连接事件时才去连接
+  * 有可读事件才去读取
+  * 有可写事件才去写入
+    * 限于网络传输能力，Channel 未必时时可写，一旦 Channel 可写，会触发 Selector 的可写事件
+
+
+
+
+
+### 4.2 Selector
+
+
+
+```mermaid
+graph TD
+subgraph selector 版
+thread --> selector
+selector --> c1(channel)
+selector --> c2(channel)
+selector --> c3(channel)
+end
+```
+
+好处
+
+* 一个线程配合 selector 就可以监控多个 channel 的事件，事件发生线程才去处理。避免非阻塞模式下所做无用功
+* 让这个线程能够被充分利用
+* 节约了线程的数量
+* 减少了线程上下文切换
+
+
+
+#### selector创建
+
+```java
+Selector selector = Selector.open();
+```
+
+#### 绑定注册 Channel 事件
+
+```java
+ssc.configureBlocking(false); // 非阻塞模式
+
+//2. 建立selector和channel的联系（注册）
+//SelectionKey 就是将来时间发生后，通过他可以知道时间和那个channel的事件。
+SelectionKey ssckey = ssc.register(selector, 0, null);
+```
+
+* channel 必须工作在非阻塞模式
+* FileChannel 没有非阻塞模式，因此不能配合 selector 一起使用
+* 绑定的事件类型可以有
+  * connect - 客户端连接成功时触发
+  * accept - 服务器端成功接受连接时触发
+  * read - 数据可读入时触发，有因为接收能力弱，数据暂不能读入的情况
+  * write - 数据可写出时触发，有因为发送能力弱，数据暂不能写出的情况
+
+#### 监听 Channel 事件
+
+可以通过下面三种方法来监听是否有事件发生，方法的返回值代表有多少 channel 发生了事件
+
+方法1，阻塞直到绑定事件发生
+
+```java
+int count = selector.select();
+```
+
+
+
+方法2，阻塞直到绑定事件发生，或是超时（时间单位为 ms）
+
+```java
+int count = selector.select(long timeout);
+```
+
+
+
+方法3，不会阻塞，也就是不管有没有事件，立刻返回，自己根据返回值检查是否有事件
+
+```java
+int count = selector.selectNow();
+```
+
+
+
+#### 💡 select 何时不阻塞
+
+> * 事件发生时
+>   * 客户端发起连接请求，会触发 accept 事件
+>   * 客户端发送数据过来，客户端正常、异常关闭时，都会触发 read 事件，另外如果发送的数据大于 buffer 缓冲区，会触发多次读取事件
+>   * channel 可写，会触发 write 事件
+>   * 在 linux 下 nio bug 发生时
+> * 调用 selector.wakeup()
+> * 调用 selector.close()
+> * selector 所在线程 interrupt
+
+
+
+### 4.3 处理 accept 事件
+
+客户端代码为
+
+```java
+public static void main(String[] args) {
+    try (Socket socket = new Socket("localhost", 8088)) {
+        System.out.println(socket);
+        socket.getOutputStream().write("world".getBytes());
+        System.in.read();
+    } catch (IOException e) {
+        e.printStackTrace();
+    }
+}
+```
+
+
+
+服务器端代码为
+
+```java
+    public static void main(String[] args) throws IOException {
+
+        // 1. 建立selector，管理多规格channel
+        Selector selector = Selector.open();
+
+
+        ByteBuffer buffer = ByteBuffer.allocate(16);
+        ServerSocketChannel ssc = ServerSocketChannel.open();
+        ssc.configureBlocking(false); // 非阻塞模式
+
+        //2. 建立selector和channel的联系（注册）
+        //SelectionKey 就是将来时间发生后，通过他可以知道时间和那个channel的事件。
+        SelectionKey ssckey = ssc.register(selector, 0, null);
+        // key只关注accept事件
+        ssckey.interestOps(SelectionKey.OP_ACCEPT);
+        log.debug("register key:{}", ssckey);
+
+        ssc.bind(new InetSocketAddress(8088));
+        List<SocketChannel> channels = new ArrayList<>();
+        while (true) {
+            //3. select 方法,没有事件发生，线程阻塞；有事件，线程才会恢复运行
+            selector.select();
+
+            //4. 处理事件
+            //用迭代器可以边遍历边删除set中的元素。
+            Iterator<SelectionKey> iter = selector.selectedKeys().iterator();
+            while (iter.hasNext()) {
+                SelectionKey key = iter.next();
+                log.debug("key: {}", key);
+                SelectableChannel channelInKey = key.channel();
+                ServerSocketChannel channel = (ServerSocketChannel) channelInKey;
+                SocketChannel sc = channel.accept();
+                log.debug("{}", sc);
+            }
+        }
+    }
+```
+
+
+
+#### 💡 事件发生后能否不处理
+
+> 事件发生后，要么处理，要么取消（cancel），不能什么都不做，否则下次该事件仍会触发，这是因为 nio 底层使用的是水平触发
+
+```java
+key.cancel();//取消事件
+or
+channel.accept();//处理事件
+```
+
+
+
+
+
+### 4.4 处理 read 事件
+
+```java
+public static void main(String[] args) throws IOException {
+    ServerSocketChannel channel = ServerSocketChannel.open();
+    channel.bind(new InetSocketAddress(8088));
+    System.out.println(channel);
+    Selector selector = Selector.open();
+    channel.configureBlocking(false);
+    SelectionKey ssckey = channel.register(selector, SelectionKey.OP_ACCEPT);//对服务器Channel使用accept事件监听。
+    log.debug("register key:{}", ssckey);
+
+    while (true) {
+        int count = selector.select();
+        //                int count = selector.selectNow();
+        log.debug("select count: {}", count);//收到一个事件
+        //                if(count <= 0) {
+        //                    continue;
+        //                }
+
+        // 获取所有事件
+        Set<SelectionKey> keys = selector.selectedKeys();
+
+        // 遍历所有事件，逐一处理
+        Iterator<SelectionKey> iter = keys.iterator();
+        while (iter.hasNext()) {
+            SelectionKey key = iter.next();
+            log.debug("当前事件key: {}", key);
+            log.debug("keys.size() = " + keys.size());
+
+            // 判断事件类型
+            if (key.isAcceptable()) {
+                ServerSocketChannel c = (ServerSocketChannel) key.channel();
+                // 必须处理
+                SocketChannel sc = c.accept();
+                sc.configureBlocking(false);
+                sc.register(selector, SelectionKey.OP_READ);//对收到的普通socketChannel监听read事件
+                log.debug("连接已建立: {}", sc);
+            } else if (key.isReadable()) {
+                try {
+                    SocketChannel sc = (SocketChannel) key.channel();
+                    ByteBuffer buffer = ByteBuffer.allocate(128);
+                    int read = sc.read(buffer);
+                    if (read == -1) {
+                        key.cancel();//这里表示是客户端通过sc.close()，正常断开，read值是-1，因此可以使用 key 取消。
+                        sc.close();
+                    } else {
+                        buffer.flip();
+                        debugRead(buffer);
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    key.cancel();//因为客户端异常断开了（就是直接强制红stop），因此需要将 key 取消。
+                }
+            }
+            // 处理完毕，必须将事件从selectedKeys中移除
+            iter.remove();
+        }
+    }
+
+}
+```
+
+开启两个客户端，发送一下文字，输出
+
+```
+sun.nio.ch.ServerSocketChannelImpl[/0:0:0:0:0:0:0:0:8088]
+[DEBUG] 16:40:34.647 [main] o.c.e.网.单.SelectorServer - register key:sun.nio.ch.SelectionKeyImpl@129a8472 
+[DEBUG] 16:40:49.527 [main] o.c.e.网.单.SelectorServer - select count: 1 
+[DEBUG] 16:40:49.528 [main] o.c.e.网.单.SelectorServer - 当前事件key: sun.nio.ch.SelectionKeyImpl@129a8472 
+[DEBUG] 16:40:49.528 [main] o.c.e.网.单.SelectorServer - keys.size() = 1 
+[DEBUG] 16:40:49.528 [main] o.c.e.网.单.SelectorServer - 连接已建立: java.nio.channels.SocketChannel[connected local=/127.0.0.1:8088 remote=/127.0.0.1:2104] 
+[DEBUG] 16:40:49.528 [main] o.c.e.网.单.SelectorServer - select count: 1 
+[DEBUG] 16:40:49.529 [main] o.c.e.网.单.SelectorServer - 当前事件key: sun.nio.ch.SelectionKeyImpl@3ac3fd8b 
+[DEBUG] 16:40:49.529 [main] o.c.e.网.单.SelectorServer - keys.size() = 1 
+[DEBUG] 16:40:49.547 [main] i.n.u.i.l.InternalLoggerFactory - Using SLF4J as the default logging framework 
++--------+-------------------- read -----------------------+----------------+
+position: [0], limit: [5]
+         +-------------------------------------------------+
+0         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
+0+--------+-------------------------------------------------+----------------+
+0|00000000| 68 65 6c 6c 6f                                  |hello           |
+0+--------+-------------------------------------------------+----------------+
+[DEBUG] 16:41:01.423 [main] o.c.e.网.单.SelectorServer - select count: 1 
+[DEBUG] 16:41:01.423 [main] o.c.e.网.单.SelectorServer - 当前事件key: sun.nio.ch.SelectionKeyImpl@129a8472 
+[DEBUG] 16:41:01.423 [main] o.c.e.网.单.SelectorServer - keys.size() = 1 
+[DEBUG] 16:41:01.424 [main] o.c.e.网.单.SelectorServer - 连接已建立: java.nio.channels.SocketChannel[connected local=/127.0.0.1:8088 remote=/127.0.0.1:2109] 
+[DEBUG] 16:41:01.424 [main] o.c.e.网.单.SelectorServer - select count: 1 
+[DEBUG] 16:41:01.424 [main] o.c.e.网.单.SelectorServer - 当前事件key: sun.nio.ch.SelectionKeyImpl@3d24753a 
+[DEBUG] 16:41:01.424 [main] o.c.e.网.单.SelectorServer - keys.size() = 1 
++--------+-------------------- read -----------------------+----------------+
+position: [0], limit: [7]
+         +-------------------------------------------------+
+0         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
+0+--------+-------------------------------------------------+----------------+
+0|00000000| 6c 61 64 69 64 6f 6c                            |ladidol         |
+0+--------+-------------------------------------------------+----------------+
+```
+
+
+
+需要主动移除一个key
+
+![image-20221103163554479](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211031635630.png)
+
+#### 💡 为何要 iter.remove()
+
+> 因为 select 在事件发生后，就会将相关的 key 放入 selectedKeys 集合，但不会在处理完后从 selectedKeys 集合中移除，需要我们自己编码删除。例如
+>
+> * 第一次触发了 ssckey 上的 accept 事件，没有移除 ssckey 
+> * 第二次触发了 sckey 上的 read 事件，但这时 selectedKeys 中还有上次的 ssckey ，在处理时因为没有真正的 serverSocket 连上了，就会导致空指针异常
+
+
+
+#### 💡 cancel 的作用
+
+> cancel 会取消注册在 selector 上的 channel，并从 keys 集合中删除 key 后续不会再监听事件
+
+比如在客户端断开连接后，会发起read事件，这时候，需要通过try catch来key.cancel（）；
+
+
+
+#### ⚠️  不处理边界的问题
+
+```java
+hell
+owor
+ld�
+�好
+```
+
+#### 处理消息的边界
+
+![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211031706616.png)
+
+* 一种思路是**固定消息长度**，数据包大小一样，服务器按预定长度读取，缺点是浪费带宽
+
+* 另一种思路是**按分隔符拆分**，缺点是效率低
+
+* 第三种思路是TLV 格式，即 Type 类型、Length 长度、Value 数据，类型和长度已知的情况下，就可以方便获取消息大小，分配合适的 buffer，缺点是 buffer 需要提前分配，如果内容过大，则影响 server 吞吐量
+
+  * Http 1.1 是 TLV 格式
+  * Http 2.0 是 LTV 格式
+
+
+
+  
+
+图示：
+
+![image-20221103170826453](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211031708721.png)
+
+
+
+```java
+private static void split(ByteBuffer source) {
+    source.flip();
+    for (int i = 0; i < source.limit(); i++) {
+        // 找到一条完整消息
+        if (source.get(i) == '\n') {
+            int length = i + 1 - source.position();
+            // 把这条完整消息存入新的 ByteBuffer
+            ByteBuffer target = ByteBuffer.allocate(length);
+            // 从 source 读，向 target 写
+            for (int j = 0; j < length; j++) {
+                target.put(source.get());
+            }
+            debugAll(target);
+        }
+    }
+    source.compact(); // 0123456789abcdef  position 16 limit 16
+}
+
+public static void main(String[] args) throws IOException {
+    // 1. 创建 selector, 管理多个 channel
+    Selector selector = Selector.open();
+    ServerSocketChannel ssc = ServerSocketChannel.open();
+    ssc.configureBlocking(false);
+    // 2. 建立 selector 和 channel 的联系（注册）
+    // SelectionKey 就是将来事件发生后，通过它可以知道事件和哪个channel的事件
+    SelectionKey sscKey = ssc.register(selector, 0, null);
+    // key 只关注 accept 事件
+    sscKey.interestOps(SelectionKey.OP_ACCEPT);
+    log.debug("sscKey:{}", sscKey);
+    ssc.bind(new InetSocketAddress(8080));
+    while (true) {
+        // 3. select 方法, 没有事件发生，线程阻塞，有事件，线程才会恢复运行
+        // select 在事件未处理时，它不会阻塞, 事件发生后要么处理，要么取消，不能置之不理
+        selector.select();
+        // 4. 处理事件, selectedKeys 内部包含了所有发生的事件
+        Iterator<SelectionKey> iter = selector.selectedKeys().iterator(); // accept, read
+        while (iter.hasNext()) {
+            SelectionKey key = iter.next();
+            // 处理key 时，要从 selectedKeys 集合中删除，否则下次处理就会有问题
+            iter.remove();
+            log.debug("key: {}", key);
+            // 5. 区分事件类型
+            if (key.isAcceptable()) { // 如果是 accept
+                ServerSocketChannel channel = (ServerSocketChannel) key.channel();
+                SocketChannel sc = channel.accept();
+                sc.configureBlocking(false);
+                ByteBuffer buffer = ByteBuffer.allocate(16); // attachment
+                // 将一个 byteBuffer 作为附件关联到 selectionKey 上
+                SelectionKey scKey = sc.register(selector, 0, buffer);
+                scKey.interestOps(SelectionKey.OP_READ);
+                log.debug("{}", sc);
+                log.debug("scKey:{}", scKey);
+            } else if (key.isReadable()) { // 如果是 read
+                try {
+                    SocketChannel channel = (SocketChannel) key.channel(); // 拿到触发事件的channel
+                    // 获取 selectionKey 上关联的附件
+                    ByteBuffer buffer = (ByteBuffer) key.attachment();
+                    int read = channel.read(buffer); // 如果是正常断开，read 的方法的返回值是 -1
+                    if(read == -1) {
+                        key.cancel();
+                    } else {
+                        split(buffer);
+                        // 需要扩容
+                        if (buffer.position() == buffer.limit()) {
+                            ByteBuffer newBuffer = ByteBuffer.allocate(buffer.capacity() * 2);
+                            buffer.flip();
+                            newBuffer.put(buffer); // 0123456789abcdef3333\n
+                            key.attach(newBuffer);
+                        }
+                    }
+
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    key.cancel();  // 因为客户端断开了,因此需要将 key 取消（从 selector 的 keys 集合中真正删除 key）
+                }
+            }
+        }
+    }
+}
+```
+
+客户端
+
+```java
+SocketChannel sc = SocketChannel.open();
+sc.connect(new InetSocketAddress("localhost", 8080));
+SocketAddress address = sc.getLocalAddress();
+// sc.write(Charset.defaultCharset().encode("hello\nworld\n"));
+sc.write(Charset.defaultCharset().encode("0123\n456789abcdef"));
+sc.write(Charset.defaultCharset().encode("0123456789abcdef3333\n"));
+System.in.read();
+```
+
+
+
+  ```mermaid
+  sequenceDiagram 
+  participant c1 as 客户端1
+  participant s as 服务器
+  participant b1 as ByteBuffer1
+  participant b2 as ByteBuffer2
+  c1 ->> s: 发送 01234567890abcdef3333\r
+  s ->> b1: 第一次 read 存入 01234567890abcdef
+  s ->> b2: 扩容
+  b1 ->> b2: 拷贝 01234567890abcdef
+  s ->> b2: 第二次 read 存入 3333\r
+  b2 ->> b2: 01234567890abcdef3333\r
+  ```
+
+
+
+#### ByteBuffer 大小分配
+
+* 每个 channel 都需要记录可能被切分的消息，因为 ByteBuffer 不能被多个 channel 共同使用，因此需要为每个 channel 维护一个独立的 ByteBuffer
+* ByteBuffer 不能太大，比如一个 ByteBuffer 1Mb 的话，要支持百万连接就要 1Tb 内存，因此需要设计大小可变的 ByteBuffer
+  * 一种思路是首先分配一个较小的 buffer，例如 4k，如果发现数据不够，再分配 8k 的 buffer，将 4k buffer 内容拷贝至 8k buffer，优点是消息连续容易处理，缺点是数据拷贝耗费性能，参考实现 [http://tutorials.jenkov.com/java-performance/resizable-array.html](http://tutorials.jenkov.com/java-performance/resizable-array.html)
+  * 另一种思路是用多个数组组成 buffer，一个数组不够，把多出来的内容写入新的数组，与前面的区别是消息存储不连续解析复杂，优点是避免了拷贝引起的性能损耗
+
+
+
+**后面Netty会详细处理消息边界。**
 
 
 
@@ -1251,25 +1702,115 @@ public static void main(String[] args) throws IOException {
 
 
 
+### 4.5 处理 write 事件
 
 
 
+#### 一次无法写完例子
+
+* 非阻塞模式下，无法保证把 buffer 中所有数据都写入 channel，因此需要追踪 write 方法的返回值（代表实际写入字节数）
+* 用 selector 监听所有 channel 的可写事件，每个 channel 都需要一个 key 来跟踪 buffer，但这样又会导致占用内存过多，就有两阶段策略
+  * 当消息处理器第一次写入消息时，才将 channel 注册到 selector 上
+  * selector 检查 channel 上的可写事件，如果所有的数据写完了，就取消 channel 的注册
+  * 如果不取消，会每次可写均会触发 write 事件
 
 
 
+```java
+public class WriteServer {
+
+    public static void main(String[] args) throws IOException {
+        ServerSocketChannel ssc = ServerSocketChannel.open();
+        ssc.configureBlocking(false);
+        ssc.bind(new InetSocketAddress(8080));
+
+        Selector selector = Selector.open();
+        ssc.register(selector, SelectionKey.OP_ACCEPT);
+
+        while(true) {
+            selector.select();
+
+            Iterator<SelectionKey> iter = selector.selectedKeys().iterator();
+            while (iter.hasNext()) {
+                SelectionKey key = iter.next();
+                iter.remove();
+                if (key.isAcceptable()) {
+                    SocketChannel sc = ssc.accept();
+                    sc.configureBlocking(false);
+                    SelectionKey sckey = sc.register(selector, SelectionKey.OP_READ);
+                    // 1. 向客户端发送内容
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < 3000000; i++) {
+                        sb.append("a");
+                    }
+                    ByteBuffer buffer = Charset.defaultCharset().encode(sb.toString());
+                    int write = sc.write(buffer);
+                    // 3. write 表示实际写了多少字节
+                    System.out.println("实际写入字节:" + write);
+                    // 4. 如果有剩余未读字节，才需要关注写事件
+                    if (buffer.hasRemaining()) {
+                        // read 1  write 4
+                        // 在原有关注事件的基础上，多关注 写事件
+                        sckey.interestOps(sckey.interestOps() + SelectionKey.OP_WRITE);
+                        // 把 buffer 作为附件加入 sckey
+                        sckey.attach(buffer);
+                    }
+                } else if (key.isWritable()) {
+                    ByteBuffer buffer = (ByteBuffer) key.attachment();
+                    SocketChannel sc = (SocketChannel) key.channel();
+                    int write = sc.write(buffer);
+                    System.out.println("实际写入字节:" + write);
+                    if (!buffer.hasRemaining()) { // 写完了
+                        key.interestOps(key.interestOps() - SelectionKey.OP_WRITE);
+                        key.attach(null);
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+客户端
+
+```java
+public class WriteClient {
+    public static void main(String[] args) throws IOException {
+        Selector selector = Selector.open();
+        SocketChannel sc = SocketChannel.open();
+        sc.configureBlocking(false);
+        sc.register(selector, SelectionKey.OP_CONNECT | SelectionKey.OP_READ);
+        sc.connect(new InetSocketAddress("localhost", 8080));
+        int count = 0;
+        while (true) {
+            selector.select();
+            Iterator<SelectionKey> iter = selector.selectedKeys().iterator();
+            while (iter.hasNext()) {
+                SelectionKey key = iter.next();
+                iter.remove();
+                if (key.isConnectable()) {
+                    System.out.println(sc.finishConnect());
+                } else if (key.isReadable()) {
+                    ByteBuffer buffer = ByteBuffer.allocate(1024 * 1024);
+                    count += sc.read(buffer);
+                    buffer.clear();
+                    System.out.println(count);
+                }
+            }
+        }
+    }
+}
+```
 
 
 
+#### 💡 write 为何要取消
+
+只要向 channel 发送数据时，socket 缓冲可写，这个事件会频繁触发，因此应当只在 socket 缓冲区写不下时再关注可写事件，数据写完之后再取消关注
 
 
 
-
-
-
-
-
-
-
+2022年11月3日19:54:22，这里有点看不下去了。后面可以再看看。
 
 
 

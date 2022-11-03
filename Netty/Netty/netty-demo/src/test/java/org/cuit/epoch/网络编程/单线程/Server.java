@@ -1,4 +1,4 @@
-package org.cuit.epoch.网络编程;
+package org.cuit.epoch.网络编程.单线程;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -23,6 +23,17 @@ public class Server {
 
     public static void main(String[] args) throws IOException {
 
+        m2();
+
+    }
+
+    /**
+     * 参数：[]
+     * 返回值：void
+     * 作者： ladidol
+     * 描述：单线程非阻塞模式
+     */
+    private static void m2() throws IOException {
         // 使用 nio 来理解非阻塞模式, 单线程
         // 0. ByteBuffer
         ByteBuffer buffer = ByteBuffer.allocate(16);
@@ -52,7 +63,6 @@ public class Server {
                 }
             }
         }
-
     }
 
     /**

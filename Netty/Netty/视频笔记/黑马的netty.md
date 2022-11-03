@@ -1478,7 +1478,7 @@ ld�
 
 #### 处理消息的边界
 
-![](img/0023.png)
+![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211031704904.png)
 
 * 一种思路是固定消息长度，数据包大小一样，服务器按预定长度读取，缺点是浪费带宽
 * 另一种思路是按分隔符拆分，缺点是效率低
