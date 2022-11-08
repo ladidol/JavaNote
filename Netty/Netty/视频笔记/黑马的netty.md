@@ -1746,6 +1746,10 @@ public class WriteClient {
 * 单线程配一个选择器，专门处理 accept 事件
 * 创建 cpu 核心数的线程，每个线程配一个选择器，轮流处理 read 事件
 
+**线程角色分工：**
+
+![image-20221108143829688](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081438815.png)
+
 
 
 ```java
@@ -1982,13 +1986,19 @@ public class UdpClient {
 
 * 阻塞 IO
 
+  > 用户线程被阻塞了
+
   ![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202210291535374.png)
 
 * 非阻塞  IO
 
-  ![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202210291535451.png)
+  > 立刻返回有没有数据，比阻塞还累。
+
+  ![image-20221108155250748](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081552903.png)
 
 * 多路复用
+
+  > 
 
   ![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202210291535451.png)
 
@@ -2029,7 +2039,7 @@ socket.getOutputStream().write(buf);
 
 内部工作流程是这样的：
 
-![](img/0024.png)
+![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081610938.png)
 
 1. java 本身并不具备 IO 读写能力，因此 read 方法调用后，要从 java 程序的**用户态**切换至**内核态**，去调用操作系统（Kernel）的读能力，将数据读入**内核缓冲区**。这期间用户线程阻塞，操作系统使用 DMA（Direct Memory Access）来实现文件读，其间也不会使用 cpu
 
@@ -2046,7 +2056,7 @@ socket.getOutputStream().write(buf);
 可以看到中间环节较多，java 的 IO 实际不是物理设备级别的读写，而是缓存的复制，底层的真正读写是操作系统来完成的
 
 * 用户态与内核态的切换发生了 3 次，这个操作比较重量级
-* 数据拷贝了共 4 次
+* 数据拷贝了**共 4 次**
 
 
 
@@ -2057,7 +2067,7 @@ socket.getOutputStream().write(buf);
 * ByteBuffer.allocate(10)  HeapByteBuffer 使用的还是 java 内存
 * ByteBuffer.allocateDirect(10)  DirectByteBuffer 使用的是操作系统内存
 
-![](img/0025.png)
+![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081611805.png)
 
 大部分步骤与优化前相同，不再赘述。唯有一点：java 可以使用 DirectByteBuf 将堆外内存映射到 jvm 内存中来直接访问使用
 
@@ -2071,7 +2081,7 @@ socket.getOutputStream().write(buf);
 
 进一步优化（底层采用了 linux 2.1 后提供的 sendFile 方法），java 中对应着两个 channel 调用 transferTo/transferFrom 方法拷贝数据
 
-![](img/0026.png)
+![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081611387.png)
 
 1. java 调用 transferTo 方法后，要从 java 程序的**用户态**切换至**内核态**，使用 DMA将数据读入**内核缓冲区**，不会使用 cpu
 2. 数据从**内核缓冲区**传输到 **socket 缓冲区**，cpu 会参与拷贝
@@ -2080,13 +2090,13 @@ socket.getOutputStream().write(buf);
 可以看到
 
 * 只发生了一次用户态与内核态的切换
-* 数据拷贝了 3 次
+* **数据拷贝了 3 次**
 
 
 
 进一步优化（linux 2.4）
 
-![](img/0027.png)
+![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081611229.png)
 
 1. java 调用 transferTo 方法后，要从 java 程序的**用户态**切换至**内核态**，使用 DMA将数据读入**内核缓冲区**，不会使用 cpu
 2. 只会将一些 offset 和 length 信息拷入 **socket 缓冲区**，几乎无消耗
@@ -2295,13 +2305,13 @@ Netty is an asynchronous event-driven network application framework
 for rapid development of maintainable high performance protocol servers & clients.
 ```
 
-Netty 是一个异步的、基于事件驱动的网络应用框架，用于快速开发可维护、高性能的网络服务器和客户端
+Netty 是一个异步的、基于事件驱动的网络应用框架，用于快速开发可维护、高性能的网络服务器和客户端（这里的异步表示多线程，不是异步io，依旧是多路复用的io模型）
 
 
 
 ### 1.2 Netty 的作者
 
-![](img/0005.png)
+![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081630062.png)
 
 他还是另一个著名网络应用框架 Mina 的重要贡献者
 
@@ -2393,7 +2403,7 @@ new ServerBootstrap()
 
 * 2 处，选择服务 Scoket 实现类，其中 NioServerSocketChannel 表示基于 NIO 的服务器端实现，其它实现还有
 
-  ![](img/0006.png)
+  ![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081638530.png)
 
 * 3 处，为啥方法叫 childHandler，是接下来添加的处理器都是给 SocketChannel 用的，而不是给 ServerSocketChannel。ChannelInitializer 处理器（仅执行一次），它的作用是待客户端 SocketChannel 建立连接后，执行 initChannel 以便添加更多的处理器
 
@@ -2429,7 +2439,7 @@ new Bootstrap()
 
 * 2 处，选择客户 Socket 实现类，NioSocketChannel 表示基于 NIO 的客户端实现，其它实现还有
 
-  ![](img/0007.png)
+  ![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081720581.png)
 
 * 3 处，添加 SocketChannel 的处理器，ChannelInitializer 处理器（仅执行一次），它的作用是待客户端 SocketChannel 建立连接后，执行 initChannel 以便添加更多的处理器
 * 4 处，指定要连接的服务器和端口
@@ -2443,7 +2453,7 @@ new Bootstrap()
 
 ### 2.4 流程梳理
 
-![](img/0040.png)
+![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211081719775.png)
 
 #### 💡 提示
 
@@ -2465,7 +2475,7 @@ new Bootstrap()
 
 ### 3.1 EventLoop
 
-事件循环对象
+**事件循环对象**
 
 EventLoop 本质是一个单线程执行器（同时维护了一个 Selector），里面有 run 方法处理 Channel 上源源不断的 io 事件。
 
@@ -2478,7 +2488,7 @@ EventLoop 本质是一个单线程执行器（同时维护了一个 Selector）�
 
 
 
-事件循环组
+**事件循环组**
 
 EventLoopGroup 是一组 EventLoop，Channel 一般会调用 EventLoopGroup 的 register 方法来绑定其中一个 EventLoop，后续这个 Channel 上的 io 事件都由此 EventLoop 来处理（保证了 io 事件处理时的线程安全）
 
@@ -2591,7 +2601,7 @@ public static void main(String[] args) throws InterruptedException {
 
 可以看到两个工人轮流处理 channel，但工人与 channel 之间进行了绑定
 
-![](img/0042.png)
+![](https://figurebed-ladidol.oss-cn-chengdu.aliyuncs.com/img/202211082111499.png)
 
 
 
